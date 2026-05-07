@@ -5,5 +5,4 @@ __pycache__/
 *.pyo
 data/papers/*.pdf
 data/outputs/
-data/*.db
 .DS_Store
