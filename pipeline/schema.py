@@ -133,6 +133,22 @@ class Outcomes(BaseModel):
     )
 
 
+class Cohort(BaseModel):
+    """One cohort (sub-population) within a paper."""
+    cohort_name: str = Field(..., description="e.g. 'KPNC non-ICU', 'UPMC derivation', 'Overall cohort'")
+    sample_size: Optional[str] = None
+    mean_age: Optional[str] = None
+    percent_male: Optional[str] = None
+    clinical_setting: Optional[str] = None
+    inclusion_criteria: Optional[str] = None
+    mortality_rate: Optional[str] = None
+    mortality_timepoint: Optional[str] = None
+    icu_length_of_stay: Optional[str] = None
+    primary_outcome: Optional[str] = None
+    source_sentence: Optional[str] = None
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+
+
 class PrognosticFinding(BaseModel):
     """One predictor→outcome association extracted from a paper."""
     predictor: Optional[str] = None
@@ -165,6 +181,10 @@ class ExtractedPaper(BaseModel):
     interventions: Interventions = Field(default_factory=Interventions)
     outcomes: Outcomes = Field(default_factory=Outcomes)
 
+    cohorts: List[Cohort] = Field(
+        default_factory=list,
+        description="One entry per distinct cohort/sub-population in the paper",
+    )
     prognostic_findings: List[PrognosticFinding] = Field(
         default_factory=list,
         description="Predictor→outcome associations with effect sizes (for counterfactual mortality use case)"

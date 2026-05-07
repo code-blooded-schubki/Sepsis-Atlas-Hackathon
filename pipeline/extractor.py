@@ -18,7 +18,7 @@ import config
 from pipeline.schema import (
     ExtractedPaper, ExtractedField,
     StudyMetadata, PatientPopulation, SepsisDefinition,
-    Interventions, Outcomes, PrognosticFinding,
+    Interventions, Outcomes, Cohort, PrognosticFinding,
 )
 from utils.logger import get_logger
 
@@ -90,6 +90,22 @@ JSON structure to fill:
     "icu_length_of_stay": {{"value": null, "source_sentence": null, "confidence": 0.0}},
     "secondary_outcomes_summary": {{"value": null, "source_sentence": null, "confidence": 0.0}}
   }},
+  "cohorts": [
+    {{
+      "cohort_name": "Overall cohort",
+      "sample_size": null,
+      "mean_age": null,
+      "percent_male": null,
+      "clinical_setting": null,
+      "inclusion_criteria": null,
+      "mortality_rate": null,
+      "mortality_timepoint": null,
+      "icu_length_of_stay": null,
+      "primary_outcome": null,
+      "source_sentence": null,
+      "confidence": 0.0
+    }}
+  ],
   "prognostic_findings": [
     {{
       "predictor": null,
@@ -105,6 +121,11 @@ JSON structure to fill:
   ],
   "extraction_notes": null
 }}
+
+cohorts is an array — include ONE object per distinct patient sub-population in the paper.
+Examples: a paper may have a derivation cohort + validation cohort, or ICU vs non-ICU, or training set + test set.
+If the paper has only one population, return a single cohort named "Overall cohort".
+cohort_name should be descriptive: use names the paper itself uses (e.g. "KPNC cohort", "UPMC derivation cohort", "Validation cohort").
 
 prognostic_findings is an array — include one object per predictor→outcome association reported.
 Common predictors: lactate, IL-6, lymphocytes, SOFA, APACHE II, procalcitonin, CRP, age, comorbidities.
@@ -186,6 +207,28 @@ def _ef(data: dict, key: str) -> ExtractedField:
     )
 
 
+def _parse_cohorts(raw: list) -> list:
+    cohorts = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        cohorts.append(Cohort(
+            cohort_name=item.get("cohort_name") or "Overall cohort",
+            sample_size=item.get("sample_size"),
+            mean_age=item.get("mean_age"),
+            percent_male=item.get("percent_male"),
+            clinical_setting=item.get("clinical_setting"),
+            inclusion_criteria=item.get("inclusion_criteria"),
+            mortality_rate=item.get("mortality_rate"),
+            mortality_timepoint=item.get("mortality_timepoint"),
+            icu_length_of_stay=item.get("icu_length_of_stay"),
+            primary_outcome=item.get("primary_outcome"),
+            source_sentence=item.get("source_sentence"),
+            confidence=float(item.get("confidence", 0.0)),
+        ))
+    return cohorts
+
+
 def _parse_findings(raw: list) -> list:
     findings = []
     for item in raw or []:
@@ -254,5 +297,6 @@ def _json_to_extracted_paper(data: dict, pdf_filename: str) -> ExtractedPaper:
             secondary_outcomes_summary=_ef(o, "secondary_outcomes_summary"),
         ),
         extraction_notes=data.get("extraction_notes"),
+        cohorts=_parse_cohorts(data.get("cohorts", [])),
         prognostic_findings=_parse_findings(data.get("prognostic_findings", [])),
     )

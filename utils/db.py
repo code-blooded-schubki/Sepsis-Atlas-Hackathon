@@ -1,8 +1,12 @@
 """
 utils/db.py — Storage layer.
 
-SQLite  → papers, sections  (structured, SQL-queryable)
-ChromaDB → chunks           (text + embeddings, semantic search)
+SQLite tables:
+  papers    — one row per paper, paper-level metadata
+  cohorts   — one row per cohort per paper (population + outcomes)
+  raw_extractions — full JSON blob per paper (for debugging)
+
+RAG / ChromaDB / chunking is disabled for now — will be re-enabled later.
 """
 
 from __future__ import annotations
@@ -20,93 +24,74 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# ── SQLite engine ──────────────────────────────────────────────────────────────
-
 def _engine():
     return create_engine(f"sqlite:///{config.DB_PATH}", echo=False)
-
-
-# ── ChromaDB client ────────────────────────────────────────────────────────────
-
-def _chroma():
-    import chromadb
-    return chromadb.PersistentClient(path=str(config.CHROMA_DIR))
-
-
-def _chunk_collection():
-    return _chroma().get_or_create_collection(
-        name="chunks",
-        metadata={"hnsw:space": "cosine"},
-    )
 
 
 # ── Init ───────────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    engine = _engine()
-    with engine.connect() as conn:
+    with _engine().connect() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS papers (
-                paper_id TEXT PRIMARY KEY,
-                pdf_filename TEXT,
-                extraction_timestamp TEXT,
-                overall_confidence REAL,
-                extraction_notes TEXT,
+                paper_id              TEXT PRIMARY KEY,
+                pdf_filename          TEXT,
+                extraction_timestamp  TEXT,
+                overall_confidence    REAL,
+                extraction_notes      TEXT,
 
-                meta_title TEXT, meta_title_src TEXT, meta_title_conf REAL,
-                meta_year TEXT, meta_year_src TEXT, meta_year_conf REAL,
-                meta_journal TEXT, meta_journal_src TEXT, meta_journal_conf REAL,
-                meta_study_design TEXT, meta_study_design_src TEXT, meta_study_design_conf REAL,
-                meta_country TEXT, meta_country_src TEXT, meta_country_conf REAL,
+                meta_title            TEXT, meta_title_src TEXT, meta_title_conf REAL,
+                meta_year             TEXT, meta_year_src TEXT, meta_year_conf REAL,
+                meta_journal          TEXT, meta_journal_src TEXT, meta_journal_conf REAL,
+                meta_study_design     TEXT, meta_study_design_src TEXT, meta_study_design_conf REAL,
+                meta_country          TEXT, meta_country_src TEXT, meta_country_conf REAL,
 
-                pop_sample_size TEXT, pop_sample_size_src TEXT, pop_sample_size_conf REAL,
-                pop_mean_age TEXT, pop_mean_age_src TEXT, pop_mean_age_conf REAL,
-                pop_percent_male TEXT, pop_percent_male_src TEXT, pop_percent_male_conf REAL,
-                pop_clinical_setting TEXT, pop_clinical_setting_src TEXT, pop_clinical_setting_conf REAL,
-                pop_inclusion_criteria TEXT, pop_inclusion_criteria_src TEXT, pop_inclusion_criteria_conf REAL,
+                sep_definition        TEXT, sep_definition_src TEXT, sep_definition_conf REAL,
+                sep_sofa              TEXT, sep_sofa_src TEXT, sep_sofa_conf REAL,
+                sep_qsofa             TEXT, sep_qsofa_src TEXT, sep_qsofa_conf REAL,
+                sep_lactate           TEXT, sep_lactate_src TEXT, sep_lactate_conf REAL,
+                sep_shock             TEXT, sep_shock_src TEXT, sep_shock_conf REAL,
 
-                sep_definition TEXT, sep_definition_src TEXT, sep_definition_conf REAL,
-                sep_sofa TEXT, sep_sofa_src TEXT, sep_sofa_conf REAL,
-                sep_qsofa TEXT, sep_qsofa_src TEXT, sep_qsofa_conf REAL,
-                sep_lactate TEXT, sep_lactate_src TEXT, sep_lactate_conf REAL,
-                sep_shock TEXT, sep_shock_src TEXT, sep_shock_conf REAL,
+                int_primary           TEXT, int_primary_src TEXT, int_primary_conf REAL,
+                int_comparison        TEXT, int_comparison_src TEXT, int_comparison_conf REAL,
+                int_antibiotics       TEXT, int_antibiotics_src TEXT, int_antibiotics_conf REAL,
+                int_fluids            TEXT, int_fluids_src TEXT, int_fluids_conf REAL,
+                int_vasopressors      TEXT, int_vasopressors_src TEXT, int_vasopressors_conf REAL,
 
-                int_primary TEXT, int_primary_src TEXT, int_primary_conf REAL,
-                int_comparison TEXT, int_comparison_src TEXT, int_comparison_conf REAL,
-                int_antibiotics TEXT, int_antibiotics_src TEXT, int_antibiotics_conf REAL,
-                int_fluids TEXT, int_fluids_src TEXT, int_fluids_conf REAL,
-                int_vasopressors TEXT, int_vasopressors_src TEXT, int_vasopressors_conf REAL,
-
-                out_primary TEXT, out_primary_src TEXT, out_primary_conf REAL,
-                out_mortality TEXT, out_mortality_src TEXT, out_mortality_conf REAL,
-                out_mortality_tp TEXT, out_mortality_tp_src TEXT, out_mortality_tp_conf REAL,
-                out_icu_los TEXT, out_icu_los_src TEXT, out_icu_los_conf REAL,
-                out_secondary TEXT, out_secondary_src TEXT, out_secondary_conf REAL,
-
-                prog_findings TEXT
+                prog_findings         TEXT
             )
         """))
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS raw_extractions (
-                paper_id TEXT PRIMARY KEY,
-                raw_json TEXT,
-                extraction_timestamp TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS sections (
-                section_id   TEXT PRIMARY KEY,
-                paper_id     TEXT NOT NULL,
-                section_name TEXT NOT NULL,
-                section_text TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS cohorts (
+                cohort_id            TEXT PRIMARY KEY,
+                paper_id             TEXT NOT NULL,
+                cohort_name          TEXT,
+                sample_size          TEXT,
+                mean_age             TEXT,
+                percent_male         TEXT,
+                clinical_setting     TEXT,
+                inclusion_criteria   TEXT,
+                mortality_rate       TEXT,
+                mortality_timepoint  TEXT,
+                icu_length_of_stay   TEXT,
+                primary_outcome      TEXT,
+                source_sentence      TEXT,
+                confidence           REAL,
                 FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
             )
         """))
         conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_sections_paper ON sections(paper_id)"
+            "CREATE INDEX IF NOT EXISTS idx_cohorts_paper ON cohorts(paper_id)"
         ))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS raw_extractions (
+                paper_id             TEXT PRIMARY KEY,
+                raw_json             TEXT,
+                extraction_timestamp TEXT
+            )
+        """))
         conn.commit()
-    logger.info(f"SQLite initialised at {config.DB_PATH}")
+    logger.info(f"Database initialised at {config.DB_PATH}")
 
 
 # ── Papers ─────────────────────────────────────────────────────────────────────
@@ -119,12 +104,11 @@ def paper_exists(paper_id: str) -> bool:
 
 
 def save_paper(paper: ExtractedPaper) -> None:
-    m, p, s, i, o = (
-        paper.metadata, paper.population, paper.sepsis_definition,
-        paper.interventions, paper.outcomes,
-    )
+    m, s, i = paper.metadata, paper.sepsis_definition, paper.interventions
+
     row = {
-        "paper_id": paper.paper_id, "pdf_filename": paper.pdf_filename,
+        "paper_id": paper.paper_id,
+        "pdf_filename": paper.pdf_filename,
         "extraction_timestamp": paper.extraction_timestamp,
         "overall_confidence": paper.overall_confidence,
         "extraction_notes": paper.extraction_notes,
@@ -134,12 +118,6 @@ def save_paper(paper: ExtractedPaper) -> None:
         "meta_journal": m.journal.value, "meta_journal_src": m.journal.source_sentence, "meta_journal_conf": m.journal.confidence,
         "meta_study_design": m.study_design.value, "meta_study_design_src": m.study_design.source_sentence, "meta_study_design_conf": m.study_design.confidence,
         "meta_country": m.country_or_region.value, "meta_country_src": m.country_or_region.source_sentence, "meta_country_conf": m.country_or_region.confidence,
-
-        "pop_sample_size": p.sample_size.value, "pop_sample_size_src": p.sample_size.source_sentence, "pop_sample_size_conf": p.sample_size.confidence,
-        "pop_mean_age": p.mean_age.value, "pop_mean_age_src": p.mean_age.source_sentence, "pop_mean_age_conf": p.mean_age.confidence,
-        "pop_percent_male": p.percent_male.value, "pop_percent_male_src": p.percent_male.source_sentence, "pop_percent_male_conf": p.percent_male.confidence,
-        "pop_clinical_setting": p.clinical_setting.value, "pop_clinical_setting_src": p.clinical_setting.source_sentence, "pop_clinical_setting_conf": p.clinical_setting.confidence,
-        "pop_inclusion_criteria": p.inclusion_criteria_summary.value, "pop_inclusion_criteria_src": p.inclusion_criteria_summary.source_sentence, "pop_inclusion_criteria_conf": p.inclusion_criteria_summary.confidence,
 
         "sep_definition": s.definition_used.value, "sep_definition_src": s.definition_used.source_sentence, "sep_definition_conf": s.definition_used.confidence,
         "sep_sofa": s.sofa_score_reported.value, "sep_sofa_src": s.sofa_score_reported.source_sentence, "sep_sofa_conf": s.sofa_score_reported.confidence,
@@ -153,12 +131,6 @@ def save_paper(paper: ExtractedPaper) -> None:
         "int_fluids": i.fluid_resuscitation.value, "int_fluids_src": i.fluid_resuscitation.source_sentence, "int_fluids_conf": i.fluid_resuscitation.confidence,
         "int_vasopressors": i.vasopressor_use.value, "int_vasopressors_src": i.vasopressor_use.source_sentence, "int_vasopressors_conf": i.vasopressor_use.confidence,
 
-        "out_primary": o.primary_outcome.value, "out_primary_src": o.primary_outcome.source_sentence, "out_primary_conf": o.primary_outcome.confidence,
-        "out_mortality": o.mortality_rate.value, "out_mortality_src": o.mortality_rate.source_sentence, "out_mortality_conf": o.mortality_rate.confidence,
-        "out_mortality_tp": o.mortality_timepoint.value, "out_mortality_tp_src": o.mortality_timepoint.source_sentence, "out_mortality_tp_conf": o.mortality_timepoint.confidence,
-        "out_icu_los": o.icu_length_of_stay.value, "out_icu_los_src": o.icu_length_of_stay.source_sentence, "out_icu_los_conf": o.icu_length_of_stay.confidence,
-        "out_secondary": o.secondary_outcomes_summary.value, "out_secondary_src": o.secondary_outcomes_summary.source_sentence, "out_secondary_conf": o.secondary_outcomes_summary.confidence,
-
         "prog_findings": json.dumps([f.model_dump() for f in paper.prognostic_findings]),
     }
 
@@ -169,102 +141,52 @@ def save_paper(paper: ExtractedPaper) -> None:
         cols = ", ".join(row.keys())
         conn.execute(text(f"INSERT INTO papers ({cols}) VALUES ({placeholders})"), row)
         conn.execute(text(
-            "INSERT INTO raw_extractions (paper_id, raw_json, extraction_timestamp) VALUES (:pid, :rj, :ts)"
+            "INSERT INTO raw_extractions (paper_id, raw_json, extraction_timestamp) "
+            "VALUES (:pid, :rj, :ts)"
         ), {"pid": paper.paper_id, "rj": paper.model_dump_json(), "ts": paper.extraction_timestamp})
         conn.commit()
     logger.debug(f"Saved paper {paper.paper_id}")
 
 
-# ── Sections (SQLite) ──────────────────────────────────────────────────────────
+# ── Cohorts ────────────────────────────────────────────────────────────────────
 
-def save_sections(sections: list[dict]) -> None:
-    if not sections:
+def save_cohorts(paper: ExtractedPaper) -> None:
+    if not paper.cohorts:
         return
-    paper_id = sections[0]["paper_id"]
     with _engine().connect() as conn:
-        conn.execute(text("DELETE FROM sections WHERE paper_id = :pid"), {"pid": paper_id})
-        for sec in sections:
-            conn.execute(text(
-                "INSERT INTO sections (section_id, paper_id, section_name, section_text) "
-                "VALUES (:section_id, :paper_id, :section_name, :section_text)"
-            ), sec)
+        conn.execute(text("DELETE FROM cohorts WHERE paper_id = :pid"), {"pid": paper.paper_id})
+        for idx, c in enumerate(paper.cohorts):
+            cohort_id = f"{paper.paper_id}_c{idx:02d}"
+            conn.execute(text("""
+                INSERT INTO cohorts (
+                    cohort_id, paper_id, cohort_name, sample_size, mean_age,
+                    percent_male, clinical_setting, inclusion_criteria,
+                    mortality_rate, mortality_timepoint, icu_length_of_stay,
+                    primary_outcome, source_sentence, confidence
+                ) VALUES (
+                    :cohort_id, :paper_id, :cohort_name, :sample_size, :mean_age,
+                    :percent_male, :clinical_setting, :inclusion_criteria,
+                    :mortality_rate, :mortality_timepoint, :icu_length_of_stay,
+                    :primary_outcome, :source_sentence, :confidence
+                )
+            """), {
+                "cohort_id": cohort_id,
+                "paper_id": paper.paper_id,
+                "cohort_name": c.cohort_name,
+                "sample_size": c.sample_size,
+                "mean_age": c.mean_age,
+                "percent_male": c.percent_male,
+                "clinical_setting": c.clinical_setting,
+                "inclusion_criteria": c.inclusion_criteria,
+                "mortality_rate": c.mortality_rate,
+                "mortality_timepoint": c.mortality_timepoint,
+                "icu_length_of_stay": c.icu_length_of_stay,
+                "primary_outcome": c.primary_outcome,
+                "source_sentence": c.source_sentence,
+                "confidence": c.confidence,
+            })
         conn.commit()
-    logger.debug(f"Saved {len(sections)} sections for {paper_id}")
-
-
-# ── Chunks (ChromaDB) ──────────────────────────────────────────────────────────
-
-def save_chunks(chunks: list[dict]) -> None:
-    """Upsert chunks into ChromaDB. Embeddings generated automatically."""
-    if not chunks:
-        return
-    col = _chunk_collection()
-    paper_id = chunks[0]["paper_id"]
-
-    # Delete existing chunks for this paper
-    existing = col.get(where={"paper_id": paper_id})
-    if existing["ids"]:
-        col.delete(ids=existing["ids"])
-
-    col.upsert(
-        ids=[c["chunk_id"] for c in chunks],
-        documents=[c["chunk_text"] for c in chunks],
-        metadatas=[{
-            "paper_id": c["paper_id"],
-            "section_id": c["section_id"],
-            "section_name": c["section_name"],
-        } for c in chunks],
-    )
-    logger.debug(f"Saved {len(chunks)} chunks for {paper_id} to ChromaDB")
-
-
-def search_chunks(query: str, n_results: int = 10, section_name: Optional[str] = None) -> list[dict]:
-    """
-    Semantic search over chunks. Returns chunk text + paper metadata joined from SQLite.
-    Optionally filter by section_name.
-    """
-    col = _chunk_collection()
-    if col.count() == 0:
-        return []
-
-    where = {"section_name": section_name} if section_name else None
-    results = col.query(
-        query_texts=[query],
-        n_results=min(n_results, col.count()),
-        where=where,
-        include=["documents", "metadatas", "distances"],
-    )
-
-    # Fetch paper metadata for all matched paper_ids in one query
-    paper_ids = list({m["paper_id"] for m in results["metadatas"][0]})
-    placeholders = ",".join(f"'{pid}'" for pid in paper_ids)
-    paper_rows = {}
-    with _engine().connect() as conn:
-        rows = conn.execute(text(
-            f"SELECT paper_id, meta_title, meta_year, meta_study_design, "
-            f"pop_sample_size, out_mortality, sep_definition, overall_confidence "
-            f"FROM papers WHERE paper_id IN ({placeholders})"
-        )).fetchall()
-        for row in rows:
-            paper_rows[row[0]] = {
-                "title": row[1], "year": row[2], "study_design": row[3],
-                "sample_size": row[4], "mortality": row[5],
-                "sepsis_definition": row[6], "confidence": row[7],
-            }
-
-    out = []
-    for i, chunk_id in enumerate(results["ids"][0]):
-        meta = results["metadatas"][0][i]
-        pid = meta["paper_id"]
-        out.append({
-            "chunk_id": chunk_id,
-            "chunk_text": results["documents"][0][i],
-            "score": round(1 - results["distances"][0][i], 4),
-            "paper_id": pid,
-            "section_name": meta.get("section_name", ""),
-            **paper_rows.get(pid, {}),
-        })
-    return out
+    logger.debug(f"Saved {len(paper.cohorts)} cohort(s) for {paper.paper_id}")
 
 
 # ── Load / export ──────────────────────────────────────────────────────────────
@@ -273,18 +195,49 @@ def load_all_papers() -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM papers", _engine())
 
 
-def load_sections(paper_id: Optional[str] = None) -> pd.DataFrame:
+def load_cohorts(paper_id: Optional[str] = None) -> pd.DataFrame:
     if paper_id:
         return pd.read_sql(
-            "SELECT * FROM sections WHERE paper_id = :pid",
+            "SELECT * FROM cohorts WHERE paper_id = :pid",
             _engine(), params={"pid": paper_id},
         )
-    return pd.read_sql("SELECT * FROM sections", _engine())
+    return pd.read_sql("SELECT * FROM cohorts", _engine())
+
+
+def load_cohorts_with_paper_meta() -> pd.DataFrame:
+    """Cohorts joined with paper-level metadata — the main analysis table."""
+    return pd.read_sql("""
+        SELECT
+            c.cohort_id, c.paper_id, c.cohort_name,
+            p.meta_title   AS title,
+            p.meta_year    AS year,
+            p.meta_journal AS journal,
+            p.meta_study_design AS study_design,
+            p.meta_country AS country,
+            p.sep_definition AS sepsis_definition,
+            c.sample_size, c.mean_age, c.percent_male,
+            c.clinical_setting, c.inclusion_criteria,
+            c.mortality_rate, c.mortality_timepoint,
+            c.icu_length_of_stay, c.primary_outcome,
+            c.confidence
+        FROM cohorts c
+        JOIN papers p ON c.paper_id = p.paper_id
+        ORDER BY p.meta_year DESC, c.paper_id, c.cohort_id
+    """, _engine())
 
 
 def export_to_csv(output_path: Optional[Path] = None) -> Path:
     output_path = output_path or config.OUTPUT_DIR / "sepsis_atlas_extracted.csv"
-    df = load_all_papers()
+    df = load_cohorts_with_paper_meta()
     df.to_csv(output_path, index=False)
-    logger.info(f"Exported {len(df)} papers to {output_path}")
+    logger.info(f"Exported {len(df)} cohort rows to {output_path}")
     return output_path
+
+
+# ── RAG / ChromaDB — disabled for now, will be re-enabled later ───────────────
+
+# def _chroma(): ...
+# def _chunk_collection(): ...
+# def save_sections(sections): ...
+# def save_chunks(chunks): ...
+# def search_chunks(query, n_results, section_name): ...
