@@ -8,7 +8,7 @@ ChromaDB → chunks           (text + embeddings, semantic search)
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -219,22 +219,50 @@ def save_chunks(chunks: list[dict]) -> None:
 
 
 def search_chunks(query: str, n_results: int = 10, section_name: Optional[str] = None) -> list[dict]:
-    """Semantic search over chunks. Optionally filter by section_name."""
+    """
+    Semantic search over chunks. Returns chunk text + paper metadata joined from SQLite.
+    Optionally filter by section_name.
+    """
     col = _chunk_collection()
+    if col.count() == 0:
+        return []
+
     where = {"section_name": section_name} if section_name else None
     results = col.query(
         query_texts=[query],
-        n_results=n_results,
+        n_results=min(n_results, col.count()),
         where=where,
         include=["documents", "metadatas", "distances"],
     )
+
+    # Fetch paper metadata for all matched paper_ids in one query
+    paper_ids = list({m["paper_id"] for m in results["metadatas"][0]})
+    placeholders = ",".join(f"'{pid}'" for pid in paper_ids)
+    paper_rows = {}
+    with _engine().connect() as conn:
+        rows = conn.execute(text(
+            f"SELECT paper_id, meta_title, meta_year, meta_study_design, "
+            f"pop_sample_size, out_mortality, sep_definition, overall_confidence "
+            f"FROM papers WHERE paper_id IN ({placeholders})"
+        )).fetchall()
+        for row in rows:
+            paper_rows[row[0]] = {
+                "title": row[1], "year": row[2], "study_design": row[3],
+                "sample_size": row[4], "mortality": row[5],
+                "sepsis_definition": row[6], "confidence": row[7],
+            }
+
     out = []
     for i, chunk_id in enumerate(results["ids"][0]):
+        meta = results["metadatas"][0][i]
+        pid = meta["paper_id"]
         out.append({
             "chunk_id": chunk_id,
             "chunk_text": results["documents"][0][i],
             "score": round(1 - results["distances"][0][i], 4),
-            **results["metadatas"][0][i],
+            "paper_id": pid,
+            "section_name": meta.get("section_name", ""),
+            **paper_rows.get(pid, {}),
         })
     return out
 

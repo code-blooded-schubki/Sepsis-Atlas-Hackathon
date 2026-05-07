@@ -6,13 +6,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 import pandas as pd
-from openai import OpenAI
 
 import config
-from pipeline.pdf_reader import extract_text, get_relevant_chunk
+from pipeline.pdf_reader import extract_text, get_relevant_chunk, parse_sections, chunk_paper
 from pipeline.extractor import extract_paper
 from pipeline.validator import validate_paper, filter_low_confidence_fields
-from utils.db import init_db, save_paper, load_all_papers
+from utils.db import init_db, save_paper, save_sections, save_chunks, load_all_papers, search_chunks
 
 st.set_page_config(page_title="Sepsis Atlas", page_icon="🧬", layout="wide")
 
@@ -48,109 +47,83 @@ def render_extracted_field(label: str, ef) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Page 1: Evidence Query
+# Page 1: Evidence Query  (semantic search via ChromaDB)
 # ═══════════════════════════════════════════════════════════════
 if page == "Evidence Query":
     st.title("Evidence Query")
-    st.markdown("Ask a clinical question — get a structured evidence table from the extracted literature.")
+    st.markdown("Ask anything about the sepsis literature — results are retrieved semantically from the full text of all papers.")
 
-    query = st.text_input(
-        "Clinical question",
-        placeholder="e.g. What is the relationship between initial lactate and 28-day mortality in septic shock?",
-    )
+    col_q, col_sec = st.columns([4, 1])
+    with col_q:
+        query = st.text_input(
+            "Clinical question",
+            placeholder="e.g. What is the relationship between lactate and 28-day mortality in septic shock?",
+        )
+    with col_sec:
+        section_filter = st.selectbox(
+            "Section filter",
+            ["All sections", "abstract", "introduction", "methods", "results", "discussion", "conclusion"],
+        )
 
-    if st.button("Search evidence", type="primary") and query:
-        df = load_all_papers()
-        if df.empty:
-            st.warning("No papers extracted yet. Go to 'Extract Paper' first.")
+    n_results = st.slider("Max results", min_value=3, max_value=20, value=8)
+
+    if st.button("Search", type="primary") and query:
+        section = None if section_filter == "All sections" else section_filter
+        with st.spinner("Searching..."):
+            results = search_chunks(query, n_results=n_results, section_name=section)
+
+        if not results:
+            st.warning("No results found. Make sure the pipeline has been run and chunks are stored.")
         else:
-            # Collect all prognostic findings + paper metadata from DB
-            findings_ctx = []
-            for _, row in df.iterrows():
-                paper_label = row.get("meta_title") or row.get("pdf_filename") or row.get("paper_id")
-                n = row.get("pop_sample_size") or "N/A"
-                setting = row.get("pop_clinical_setting") or "N/A"
-                raw = row.get("prog_findings")
-                if raw:
-                    try:
-                        findings = json.loads(raw)
-                    except Exception:
-                        findings = []
-                    for f in findings:
-                        findings_ctx.append({
-                            "study": paper_label,
-                            "n": n,
-                            "setting": setting,
-                            **f,
-                        })
+            st.success(f"{len(results)} matching passage(s) found across the literature")
 
-            if not findings_ctx:
-                st.info("No prognostic findings extracted yet. Re-run extraction on your papers.")
-            else:
-                with st.spinner("Searching evidence..."):
-                    client = OpenAI(api_key=config.OPENROUTER_API_KEY, base_url=config.OPENROUTER_BASE_URL)
-                    findings_text = json.dumps(findings_ctx, indent=2)
-                    prompt = f"""You are a clinical evidence analyst.
+            # Summary table
+            summary_rows = []
+            for r in results:
+                summary_rows.append({
+                    "Score": r["score"],
+                    "Paper": r.get("title") or r["paper_id"],
+                    "Year": r.get("year") or "—",
+                    "Section": r["section_name"],
+                    "Design": r.get("study_design") or "—",
+                    "N": r.get("sample_size") or "—",
+                    "Mortality": r.get("mortality") or "—",
+                })
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
 
-Clinical question: {query}
+            st.markdown("---")
+            st.subheader("Matching passages")
+            for r in results:
+                title = r.get("title") or r["paper_id"]
+                year  = r.get("year") or ""
+                score = r["score"]
+                section_name = r["section_name"]
 
-Available findings from {len(df)} studies ({len(findings_ctx)} associations):
-{findings_text}
+                badge = "🟢" if score >= 0.7 else "🟡" if score >= 0.5 else "🔴"
+                with st.expander(f"{badge} **{title}** ({year}) — {section_name} — score {score}"):
+                    st.markdown(f"> {r['chunk_text']}")
+                    st.divider()
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Study design", r.get("study_design") or "—")
+                    c2.metric("N patients",   r.get("sample_size") or "—")
+                    c3.metric("Mortality",    r.get("mortality") or "—")
+                    c4.metric("Sepsis def.",  r.get("sepsis_definition") or "—")
 
-Return a JSON array of objects relevant to the question. Each object:
-{{
-  "study": "study title or ID",
-  "population": "patient population",
-  "n": "sample size",
-  "predictor": "predictor variable",
-  "outcome": "outcome measured",
-  "timing": "measurement timing",
-  "effect_size": "AUC / OR / HR / cutoff value",
-  "performance": "sensitivity, specificity, AUC if available",
-  "method": "statistical method",
-  "source": "exact quote from paper"
-}}
-
-Include only findings directly relevant to the question.
-If a field is unknown write null.
-Return ONLY the JSON array, no prose."""
-
-                    resp = client.chat.completions.create(
-                        model=config.MODEL,
-                        max_tokens=2000,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    raw_answer = resp.choices[0].message.content.strip()
-
-                import re
-                raw_answer = re.sub(r"^```(?:json)?\s*", "", raw_answer, flags=re.MULTILINE)
-                raw_answer = re.sub(r"\s*```$", "", raw_answer.strip(), flags=re.MULTILINE)
-
-                try:
-                    rows = json.loads(raw_answer)
-                    if not rows:
-                        st.info("No relevant findings found for this query.")
-                    else:
-                        result_df = pd.DataFrame(rows)
-                        st.success(f"Found {len(result_df)} relevant association(s) across the literature")
-                        st.dataframe(result_df, use_container_width=True)
-
-                        csv = result_df.to_csv(index=False)
-                        st.download_button("⬇ Download evidence table (CSV)", csv,
-                                           file_name="evidence_table.csv", mime="text/csv")
-
-                        st.markdown("---")
-                        st.subheader("Source traces")
-                        for i, r in result_df.iterrows():
-                            src = r.get("source") or ""
-                            if src:
-                                study = r.get("study") or "Unknown study"
-                                pred = r.get("predictor") or "?"
-                                with st.expander(f"**{study}** — {pred}"):
-                                    st.markdown(f"> *\"{src}\"*")
-                except (json.JSONDecodeError, ValueError):
-                    st.error("Could not parse structured response. Raw output:")
-                    st.text(raw_answer)
+            # Download
+            dl_df = pd.DataFrame([{
+                "paper_id": r["paper_id"],
+                "title": r.get("title") or "",
+                "year": r.get("year") or "",
+                "section": r["section_name"],
+                "score": r["score"],
+                "passage": r["chunk_text"],
+            } for r in results])
+            st.download_button(
+                "⬇ Download results (CSV)",
+                dl_df.to_csv(index=False),
+                file_name="semantic_search_results.csv",
+                mime="text/csv",
+            )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -170,15 +143,23 @@ elif page == "Extract Paper":
         if st.button("Run extraction", type="primary"):
             with st.spinner("Extracting text from PDF..."):
                 full_text = extract_text(tmp_path)
-                chunk = get_relevant_chunk(full_text, max_chars=config.CHUNK_SIZE)
 
             st.success(f"Extracted {len(full_text):,} characters from PDF")
 
             with st.expander("Raw extracted text (first 2000 chars)", expanded=False):
                 st.text(full_text[:2000])
 
-            with st.spinner("Sending to Claude for structured extraction..."):
-                paper = extract_paper(chunk, uploaded.name)
+            paper_id = tmp_path.stem
+            with st.spinner("Parsing sections and saving chunks..."):
+                sections = parse_sections(full_text, paper_id)
+                save_sections(sections)
+                chunks = chunk_paper(sections, paper_id)
+                save_chunks(chunks)
+            st.info(f"Saved {len(sections)} sections and {len(chunks)} chunks to database")
+
+            with st.spinner("Sending to LLM for structured extraction..."):
+                llm_text = get_relevant_chunk(full_text, max_chars=config.CHUNK_SIZE)
+                paper = extract_paper(llm_text, uploaded.name)
                 is_valid, warnings = validate_paper(paper)
                 paper = filter_low_confidence_fields(paper, min_confidence=config.MIN_CONFIDENCE)
                 paper.compute_overall_confidence()
