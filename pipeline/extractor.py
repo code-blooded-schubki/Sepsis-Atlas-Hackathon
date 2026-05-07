@@ -1,5 +1,5 @@
 """
-pipeline/extractor.py — Send paper text to Claude, get back structured data.
+pipeline/extractor.py — Send paper text to the LLM, get back structured data.
 
 This is the heart of the pipeline.
 The LLM receives the paper text + a detailed prompt, and must return

@@ -13,9 +13,9 @@ load_dotenv()  # loads from a .env file if present (recommended — don't hardco
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "YOUR_KEY_HERE")
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
-MODEL: str = "anthropic/claude-3.5-sonnet"
+MODEL: str = "anthropic/claude-sonnet-4.5"
 
-MAX_TOKENS: int = 2500
+MAX_TOKENS: int = 8096
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 ROOT_DIR   = Path(__file__).parent
@@ -23,10 +23,12 @@ DATA_DIR   = ROOT_DIR / "data"
 PAPERS_DIR = DATA_DIR / "papers"    # drop PDFs here
 OUTPUT_DIR = DATA_DIR / "outputs"   # extracted JSON/CSV land here
 DB_PATH    = DATA_DIR / "sepsis_atlas.db"
+CHROMA_DIR = DATA_DIR / "chroma"
 
 # Create dirs if they don't exist
 PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Extraction settings ──────────────────────────────────────────────────────
 CHUNK_SIZE: int = 12000

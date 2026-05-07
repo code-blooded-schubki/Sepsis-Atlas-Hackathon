@@ -1,10 +1,8 @@
 """
-utils/db.py — Save and load extracted papers to/from SQLite.
+utils/db.py — Storage layer.
 
-Uses SQLAlchemy Core (not ORM) to keep it simple.
-Two tables:
-  - papers: one row per paper, flat columns for every extracted field
-  - raw_extractions: stores the full JSON blob for each paper (useful for debugging)
+SQLite  → papers, sections  (structured, SQL-queryable)
+ChromaDB → chunks           (text + embeddings, semantic search)
 """
 
 from __future__ import annotations
@@ -13,11 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import (
-    create_engine, text, Table, Column, MetaData,
-    String, Float, Text, DateTime
-)
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import create_engine, text
 
 import config
 from pipeline.schema import ExtractedPaper
@@ -25,17 +19,31 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Engine ─────────────────────────────────────────────────────────────────────
 
-def _get_engine():
+# ── SQLite engine ──────────────────────────────────────────────────────────────
+
+def _engine():
     return create_engine(f"sqlite:///{config.DB_PATH}", echo=False)
 
 
-# ── Table creation ─────────────────────────────────────────────────────────────
+# ── ChromaDB client ────────────────────────────────────────────────────────────
+
+def _chroma():
+    import chromadb
+    return chromadb.PersistentClient(path=str(config.CHROMA_DIR))
+
+
+def _chunk_collection():
+    return _chroma().get_or_create_collection(
+        name="chunks",
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+# ── Init ───────────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    """Create database tables if they don't exist."""
-    engine = _get_engine()
+    engine = _engine()
     with engine.connect() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS papers (
@@ -45,35 +53,30 @@ def init_db() -> None:
                 overall_confidence REAL,
                 extraction_notes TEXT,
 
-                -- metadata
                 meta_title TEXT, meta_title_src TEXT, meta_title_conf REAL,
                 meta_year TEXT, meta_year_src TEXT, meta_year_conf REAL,
                 meta_journal TEXT, meta_journal_src TEXT, meta_journal_conf REAL,
                 meta_study_design TEXT, meta_study_design_src TEXT, meta_study_design_conf REAL,
                 meta_country TEXT, meta_country_src TEXT, meta_country_conf REAL,
 
-                -- population
                 pop_sample_size TEXT, pop_sample_size_src TEXT, pop_sample_size_conf REAL,
                 pop_mean_age TEXT, pop_mean_age_src TEXT, pop_mean_age_conf REAL,
                 pop_percent_male TEXT, pop_percent_male_src TEXT, pop_percent_male_conf REAL,
                 pop_clinical_setting TEXT, pop_clinical_setting_src TEXT, pop_clinical_setting_conf REAL,
                 pop_inclusion_criteria TEXT, pop_inclusion_criteria_src TEXT, pop_inclusion_criteria_conf REAL,
 
-                -- sepsis definition
                 sep_definition TEXT, sep_definition_src TEXT, sep_definition_conf REAL,
                 sep_sofa TEXT, sep_sofa_src TEXT, sep_sofa_conf REAL,
                 sep_qsofa TEXT, sep_qsofa_src TEXT, sep_qsofa_conf REAL,
                 sep_lactate TEXT, sep_lactate_src TEXT, sep_lactate_conf REAL,
                 sep_shock TEXT, sep_shock_src TEXT, sep_shock_conf REAL,
 
-                -- interventions
                 int_primary TEXT, int_primary_src TEXT, int_primary_conf REAL,
                 int_comparison TEXT, int_comparison_src TEXT, int_comparison_conf REAL,
                 int_antibiotics TEXT, int_antibiotics_src TEXT, int_antibiotics_conf REAL,
                 int_fluids TEXT, int_fluids_src TEXT, int_fluids_conf REAL,
                 int_vasopressors TEXT, int_vasopressors_src TEXT, int_vasopressors_conf REAL,
 
-                -- outcomes
                 out_primary TEXT, out_primary_src TEXT, out_primary_conf REAL,
                 out_mortality TEXT, out_mortality_src TEXT, out_mortality_conf REAL,
                 out_mortality_tp TEXT, out_mortality_tp_src TEXT, out_mortality_tp_conf REAL,
@@ -90,35 +93,38 @@ def init_db() -> None:
                 extraction_timestamp TEXT
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS sections (
+                section_id   TEXT PRIMARY KEY,
+                paper_id     TEXT NOT NULL,
+                section_name TEXT NOT NULL,
+                section_text TEXT NOT NULL,
+                FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_sections_paper ON sections(paper_id)"
+        ))
         conn.commit()
-    logger.info(f"Database initialised at {config.DB_PATH}")
+    logger.info(f"SQLite initialised at {config.DB_PATH}")
 
+
+# ── Papers ─────────────────────────────────────────────────────────────────────
 
 def paper_exists(paper_id: str) -> bool:
-    """Return True if this paper_id is already in the database."""
-    engine = _get_engine()
-    with engine.connect() as conn:
-        result = conn.execute(
+    with _engine().connect() as conn:
+        return conn.execute(
             text("SELECT 1 FROM papers WHERE paper_id = :pid"), {"pid": paper_id}
-        ).fetchone()
-    return result is not None
+        ).fetchone() is not None
 
 
 def save_paper(paper: ExtractedPaper) -> None:
-    """
-    Save an ExtractedPaper to the database.
-    Overwrites existing rows with the same paper_id.
-    """
-    engine = _get_engine()
-    m = paper.metadata
-    p = paper.population
-    s = paper.sepsis_definition
-    i = paper.interventions
-    o = paper.outcomes
-
+    m, p, s, i, o = (
+        paper.metadata, paper.population, paper.sepsis_definition,
+        paper.interventions, paper.outcomes,
+    )
     row = {
-        "paper_id": paper.paper_id,
-        "pdf_filename": paper.pdf_filename,
+        "paper_id": paper.paper_id, "pdf_filename": paper.pdf_filename,
         "extraction_timestamp": paper.extraction_timestamp,
         "overall_confidence": paper.overall_confidence,
         "extraction_notes": paper.extraction_notes,
@@ -156,31 +162,99 @@ def save_paper(paper: ExtractedPaper) -> None:
         "prog_findings": json.dumps([f.model_dump() for f in paper.prognostic_findings]),
     }
 
-    raw_json = paper.model_dump_json()
-
-    with engine.connect() as conn:
+    with _engine().connect() as conn:
         conn.execute(text("DELETE FROM papers WHERE paper_id = :pid"), {"pid": paper.paper_id})
         conn.execute(text("DELETE FROM raw_extractions WHERE paper_id = :pid"), {"pid": paper.paper_id})
-
         placeholders = ", ".join(f":{k}" for k in row)
         cols = ", ".join(row.keys())
         conn.execute(text(f"INSERT INTO papers ({cols}) VALUES ({placeholders})"), row)
         conn.execute(text(
             "INSERT INTO raw_extractions (paper_id, raw_json, extraction_timestamp) VALUES (:pid, :rj, :ts)"
-        ), {"pid": paper.paper_id, "rj": raw_json, "ts": paper.extraction_timestamp})
+        ), {"pid": paper.paper_id, "rj": paper.model_dump_json(), "ts": paper.extraction_timestamp})
         conn.commit()
+    logger.debug(f"Saved paper {paper.paper_id}")
 
-    logger.debug(f"Saved {paper.paper_id} to database")
 
+# ── Sections (SQLite) ──────────────────────────────────────────────────────────
+
+def save_sections(sections: list[dict]) -> None:
+    if not sections:
+        return
+    paper_id = sections[0]["paper_id"]
+    with _engine().connect() as conn:
+        conn.execute(text("DELETE FROM sections WHERE paper_id = :pid"), {"pid": paper_id})
+        for sec in sections:
+            conn.execute(text(
+                "INSERT INTO sections (section_id, paper_id, section_name, section_text) "
+                "VALUES (:section_id, :paper_id, :section_name, :section_text)"
+            ), sec)
+        conn.commit()
+    logger.debug(f"Saved {len(sections)} sections for {paper_id}")
+
+
+# ── Chunks (ChromaDB) ──────────────────────────────────────────────────────────
+
+def save_chunks(chunks: list[dict]) -> None:
+    """Upsert chunks into ChromaDB. Embeddings generated automatically."""
+    if not chunks:
+        return
+    col = _chunk_collection()
+    paper_id = chunks[0]["paper_id"]
+
+    # Delete existing chunks for this paper
+    existing = col.get(where={"paper_id": paper_id})
+    if existing["ids"]:
+        col.delete(ids=existing["ids"])
+
+    col.upsert(
+        ids=[c["chunk_id"] for c in chunks],
+        documents=[c["chunk_text"] for c in chunks],
+        metadatas=[{
+            "paper_id": c["paper_id"],
+            "section_id": c["section_id"],
+            "section_name": c["section_name"],
+        } for c in chunks],
+    )
+    logger.debug(f"Saved {len(chunks)} chunks for {paper_id} to ChromaDB")
+
+
+def search_chunks(query: str, n_results: int = 10, section_name: Optional[str] = None) -> list[dict]:
+    """Semantic search over chunks. Optionally filter by section_name."""
+    col = _chunk_collection()
+    where = {"section_name": section_name} if section_name else None
+    results = col.query(
+        query_texts=[query],
+        n_results=n_results,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+    out = []
+    for i, chunk_id in enumerate(results["ids"][0]):
+        out.append({
+            "chunk_id": chunk_id,
+            "chunk_text": results["documents"][0][i],
+            "score": round(1 - results["distances"][0][i], 4),
+            **results["metadatas"][0][i],
+        })
+    return out
+
+
+# ── Load / export ──────────────────────────────────────────────────────────────
 
 def load_all_papers() -> pd.DataFrame:
-    """Load all extracted papers as a pandas DataFrame."""
-    engine = _get_engine()
-    return pd.read_sql("SELECT * FROM papers", engine)
+    return pd.read_sql("SELECT * FROM papers", _engine())
+
+
+def load_sections(paper_id: Optional[str] = None) -> pd.DataFrame:
+    if paper_id:
+        return pd.read_sql(
+            "SELECT * FROM sections WHERE paper_id = :pid",
+            _engine(), params={"pid": paper_id},
+        )
+    return pd.read_sql("SELECT * FROM sections", _engine())
 
 
 def export_to_csv(output_path: Optional[Path] = None) -> Path:
-    """Export all papers to a CSV file. Returns the path."""
     output_path = output_path or config.OUTPUT_DIR / "sepsis_atlas_extracted.csv"
     df = load_all_papers()
     df.to_csv(output_path, index=False)
