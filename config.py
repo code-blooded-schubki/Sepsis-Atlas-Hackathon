@@ -31,7 +31,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Extraction settings ──────────────────────────────────────────────────────
-CHUNK_SIZE: int = 20000
+CHUNK_SIZE: int = 80000  # Claude Sonnet 4.5 has 200k context — send the full paper
 
 # If True, the pipeline will skip papers already in the DB (useful for re-runs)
 SKIP_ALREADY_EXTRACTED: bool = True

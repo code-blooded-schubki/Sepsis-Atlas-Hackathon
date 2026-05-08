@@ -14,7 +14,9 @@ logger = get_logger(__name__)
 # ── Text cleaning ─────────────────────────────────────────────────────────────
 
 def _clean_text(text: str) -> str:
-    lines = [ln for ln in text.splitlines() if len(ln.strip()) > 5]
+    # Only drop truly empty lines or single-character noise (page numbers etc.)
+    # Keep short lines — table cells like "28", "N/A", "%" must survive
+    lines = [ln for ln in text.splitlines() if len(ln.strip()) > 1]
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.replace("\xad", "").replace("ﬁ", "fi").replace("ﬂ", "fl")
@@ -27,9 +29,20 @@ def _extract_with_pdfplumber(pdf_path: Path) -> Optional[str]:
         pages = []
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=2, y_tolerance=2)
-                if page_text:
-                    pages.append(page_text)
+                # Extract tables first so they appear as structured text
+                table_texts = []
+                for table in page.extract_tables():
+                    rows = []
+                    for row in table:
+                        rows.append(" | ".join(str(c or "").strip() for c in row))
+                    table_texts.append("\n".join(rows))
+
+                page_text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+                combined = page_text
+                if table_texts:
+                    combined += "\n\n[TABLES]\n" + "\n\n".join(table_texts)
+                if combined.strip():
+                    pages.append(combined)
         return "\n\n".join(pages) if pages else None
     except Exception as e:
         logger.warning(f"pdfplumber failed on {pdf_path.name}: {e}")
@@ -94,36 +107,27 @@ def extract_text(pdf_path: Path) -> str:
     return cleaned
 
 
-def get_relevant_chunk(full_text: str, max_chars: int = 20000) -> str:
+def get_relevant_chunk(full_text: str, max_chars: int = 80000) -> str:
     """
-    Return the most relevant portion of a paper for LLM extraction.
-    Strategy: remove references section, then take as much as possible.
+    Prepare paper text for LLM extraction.
+    1. Strip references section (no clinical data there)
+    2. Send everything else — tables, methods, results, discussion all included
+    3. If still over limit (rare), trim from the tail not the middle
     """
-    # Remove references section — not useful for extraction
+    # Strip references — nothing useful there for extraction
     ref_match = re.search(
-        r'\n(references|bibliography|literatur)\s*\n', 
+        r'\n(references|bibliography|literatur)\s*\n',
         full_text, re.IGNORECASE
     )
     if ref_match:
         full_text = full_text[:ref_match.start()]
 
-    # If short enough take everything
+    # Full paper fits — send everything (the normal case for 80k limit)
     if len(full_text) <= max_chars:
         return full_text
 
-    # Find results section
-    results_match = re.search(
-        r'\n(results|findings|outcomes|discussion)\s*\n', 
-        full_text, re.IGNORECASE
-    )
-
-    if results_match:
-        # Take first 4000 chars (abstract/intro) + everything from results
-        top = full_text[:4000]
-        bottom = full_text[results_match.start():]
-        combined = top + "\n\n--- [methods omitted] ---\n\n" + bottom
-        return combined[:max_chars]
-    
+    # Over limit: keep the front (abstract + methods + tables) and trim the tail
+    # Do NOT skip methods — Table 1 baseline characteristics lives there
     return full_text[:max_chars]
 
 
