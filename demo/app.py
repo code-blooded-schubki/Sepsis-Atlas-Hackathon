@@ -13,6 +13,10 @@ import json
 import re
 from pathlib import Path
 
+import fitz  # PyMuPDF
+from streamlit_pdf_viewer import pdf_viewer
+from streamlit_option_menu import option_menu
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
@@ -37,14 +41,14 @@ logger = get_logger(__name__)
 st.set_page_config(page_title="Sepsis Atlas", page_icon="🧬", layout="wide")
 init_db()
 
-st.sidebar.title("🧬 Sepsis Atlas")
-page = st.sidebar.radio("Navigate", [
-    "Evidence Query",
-    "Use Cases",
-    "Extract Paper",
-    "Browse Database",
-    "Export"
-])
+with st.sidebar:
+    page = option_menu(
+        menu_title="Sepsis Atlas",
+        menu_icon="activity",
+        options=["Evidence Query", "Use Cases", "Extract Paper", "Browse Database", "Export"],
+        icons=["search", "lightbulb", "file-earmark-text", "database", "download"],
+        default_index=0,
+    )
 
 _llm = OpenAI(api_key=config.OPENROUTER_API_KEY, base_url=config.OPENROUTER_BASE_URL)
 
@@ -56,6 +60,33 @@ def confidence_badge(conf: float) -> str:
     elif conf >= 0.5: return f"🟡 {conf:.0%}"
     else:             return f"🔴 {conf:.0%}"
 
+def find_sentence_annotations(pdf_path: str, sentence: str):
+    """Search PDF for a sentence and return highlight annotations + the first page it appears on."""
+    sentence = re.split(r"\.{3}|…", sentence)[0].strip()
+    if not sentence:
+        return [], None
+
+    annotations = []
+    target_page = None
+    try:
+        doc = fitz.open(pdf_path)
+        for page_num, page in enumerate(doc, start=1):
+            rects = page.search_for(sentence)
+            if not rects and len(sentence) > 60:
+                rects = page.search_for(sentence[:60])
+            for rect in rects:
+                annotations.append({
+                    "page": page_num,
+                    "x": rect.x0, "y": rect.y0,
+                    "width": rect.width, "height": rect.height,
+                    "color": "rgba(255, 235, 59, 0.7)",
+                })
+                if target_page is None:
+                    target_page = page_num
+        doc.close()
+    except Exception as e:
+        logger.warning(f"PDF highlight search failed: {e}")
+    return annotations, target_page
 
 def show_source_trace(source_sentence: str, paper_id: str,
                        predictor: str = None, outcome: str = None,
@@ -239,7 +270,7 @@ if page == "Evidence Query":
                     st.error(f"LLM error: {e}")
                     st.stop()
 
-            with st.expander("Generated SQL", expanded=False):
+            with st.expander("Generated SQL", expanded=True):
                 st.code(sql, language="sql")
 
             try:
@@ -265,7 +296,7 @@ if page == "Evidence Query":
                 )
 
                 # Source traces
-                st.markdown("---")
+                st.divider()
                 st.subheader("Source traces")
                 show_source_traces_from_df(results)
 
@@ -321,7 +352,7 @@ elif page == "Use Cases":
                 mime="text/csv",
             )
 
-            st.markdown("---")
+            st.divider()
             st.subheader("Source traces")
             show_source_traces_from_df(evidence_df)
 
@@ -372,7 +403,7 @@ elif page == "Use Cases":
                 mime="text/csv",
             )
 
-        st.markdown("---")
+        st.divider()
         st.markdown("### Ranked Predictors")
         st.markdown("Biomarkers and scores ranked by strongest prognostic metric.")
 
@@ -419,7 +450,7 @@ Predictors: {ranked_df["predictor"].tolist()}
                 mime="text/csv",
             )
 
-            st.markdown("---")
+            st.divider()
             st.subheader("Source traces")
             show_source_traces_from_df(ranked_df.rename(columns={"study": "paper_id"}))
 # ═══════════════════════════════════════════════════════════════
@@ -435,12 +466,12 @@ elif page == "Extract Paper":
             f.write(uploaded.read())
 
         if st.button("Run extraction", type="primary"):
+            for k in ("paper", "pdf_path", "full_text", "warnings",
+                      "selected_sentence", "_last_findings_idx"):
+                st.session_state.pop(k, None)
+
             with st.spinner("Extracting text..."):
                 full_text = extract_text(tmp_path)
-            st.success(f"Extracted {len(full_text):,} characters")
-
-            with st.expander("Raw text (first 2000 chars)"):
-                st.text(full_text[:2000])
 
             with st.spinner("Sending to LLM for structured extraction..."):
                 llm_text = get_relevant_chunk(full_text, max_chars=config.CHUNK_SIZE)
@@ -450,34 +481,38 @@ elif page == "Extract Paper":
                 paper.compute_overall_confidence()
                 save_paper(paper)
                 save_cohorts(paper)
-                save_findings(paper)
+                save_findings(paper)   # ← keep colleague's findings save
 
-            if warnings:
-                for w in warnings:
-                    st.warning(w)
+            st.session_state.paper = paper
+            st.session_state.pdf_path = str(tmp_path)
+            st.session_state.full_text = full_text
+            st.session_state.warnings = warnings
+            st.session_state.selected_sentence = None
 
-            st.subheader(f"Extraction complete — confidence: {paper.overall_confidence:.0%}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Title", (paper.metadata.title.value or "N/A")[:40])
-            c2.metric("Cohorts found", len(paper.cohorts))
-            c3.metric("Overall confidence", f"{paper.overall_confidence:.0%}")
+    if "paper" in st.session_state:
+        paper = st.session_state.paper
+        full_text = st.session_state.get("full_text", "")
+        warnings = st.session_state.get("warnings", [])
 
-            # Cohorts
+        for w in warnings:
+            st.warning(w)
+
+        st.success(f"Extracted {len(full_text):,} characters")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Title", (paper.metadata.title.value or "N/A")[:40])
+        c2.metric("Cohorts found", len(paper.cohorts))
+        c3.metric("Overall confidence", f"{paper.overall_confidence:.0%}")
+
+        st.divider()
+
+        col_data, col_pdf = st.columns([2, 1], gap="large")
+
+        with col_data:
             if paper.cohorts:
                 st.markdown("### Cohorts")
                 cohort_rows = [c.model_dump() for c in paper.cohorts]
                 st.dataframe(pd.DataFrame(cohort_rows), use_container_width=True)
-                st.markdown("#### Cohort sources")
-                for c in paper.cohorts:
-                    show_source_trace(
-                        source_sentence=c.source_sentence,
-                        paper_id=paper.paper_id,
-                        outcome=c.cohort_name,
-                        effect_size=f"Mortality: {c.mortality_rate}" if c.mortality_rate else None,
-                        confidence=c.confidence
-                    )
 
-            # Study metadata
             st.markdown("### Study metadata")
             for label, ef in [
                 ("Title", paper.metadata.title),
@@ -487,34 +522,64 @@ elif page == "Extract Paper":
                 ("Country", paper.metadata.country_or_region),
             ]:
                 if ef.value:
-                    show_source_trace(
-                        source_sentence=ef.source_sentence,
-                        paper_id=paper.paper_id,
-                        predictor=label,
-                        outcome=ef.value[:80],
-                        confidence=ef.confidence
-                    )
+                    with st.expander(f"**{label}** — {ef.value[:80]}"):
+                        st.write(ef.value)
+                        if ef.source_sentence:
+                            st.markdown(f"> *\"{ef.source_sentence}\"*")
+                            if st.button("📍 Show in PDF", key=f"hl_{label}"):
+                                st.session_state.selected_sentence = ef.source_sentence
+                                st.rerun()
+                        st.caption(f"Confidence: {confidence_badge(ef.confidence)}")
 
-            # Prognostic findings
             if paper.prognostic_findings:
                 st.markdown("### Prognostic findings")
-                show_cols = ["predictor", "outcome", "effect_size", "method", "confidence"]
-                df_findings = pd.DataFrame([f.model_dump() for f in paper.prognostic_findings])
-                st.dataframe(df_findings[[c for c in show_cols if c in df_findings.columns]], use_container_width=True)
-                st.markdown("#### Finding sources")
-                for f in paper.prognostic_findings:
-                    show_source_trace(
-                        source_sentence=f.source_sentence,
-                        paper_id=paper.paper_id,
-                        predictor=f.predictor,
-                        outcome=f.outcome,
-                        effect_size=f.effect_size,
-                        confidence=f.confidence
-                    )
+                st.caption("Click a row to highlight its source sentence in the PDF.")
+                findings_df = pd.DataFrame([f.model_dump() for f in paper.prognostic_findings])
+                selection = st.dataframe(
+                    findings_df,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="findings_table",
+                )
+                if selection.selection.rows:
+                    idx = selection.selection.rows[0]
+                    if idx != st.session_state.get("_last_findings_idx"):
+                        sentence = paper.prognostic_findings[idx].source_sentence
+                        if sentence:
+                            st.session_state.selected_sentence = sentence
+                        st.session_state._last_findings_idx = idx
+                else:
+                    st.session_state._last_findings_idx = None
+
+            with st.expander("Raw text (first 2000 chars)"):
+                st.text(full_text[:2000])
 
             with st.expander("Full JSON"):
                 st.json(json.loads(paper.model_dump_json()))
 
+        with col_pdf:
+            st.markdown("### PDF")
+            selected = st.session_state.get("selected_sentence")
+            if selected:
+                preview = selected if len(selected) <= 120 else selected[:120] + "..."
+                st.info(f"Highlighting: \"{preview}\"")
+                annotations, target_page = find_sentence_annotations(
+                    st.session_state.pdf_path, selected
+                )
+                if not annotations:
+                    st.warning("Couldn't locate that sentence in the PDF.")
+                pdf_viewer(
+                    input=st.session_state.pdf_path,
+                    width=350, height=700,
+                    annotations=annotations,
+                    annotation_outline_size=2,
+                    resolution_boost=2,
+                    scroll_to_annotation=1 if annotations else None,
+                )
+            else:
+                st.caption("Click 📍 on a metadata field or click a finding row to highlight here.")
+                pdf_viewer(input=st.session_state.pdf_path, width=350, height=700, resolution_boost=2)
 
 # ═══════════════════════════════════════════════════════════════
 # Page 3: Browse Database
@@ -533,7 +598,7 @@ elif page == "Browse Database":
             display_cols = [c for c in df.columns if c != "source_sentence"]
             st.dataframe(df[display_cols], use_container_width=True)
 
-            st.markdown("---")
+            st.divider()
             st.subheader("Source traces")
 
             # Cohort-level sources
@@ -594,7 +659,7 @@ elif page == "Browse Database":
             show_cols = [c for c in show_cols if c in filtered.columns]
             st.dataframe(filtered[show_cols], use_container_width=True)
 
-            st.markdown("---")
+            st.divider()
             st.subheader("Source traces")
             show_source_traces_from_df(filtered)
 

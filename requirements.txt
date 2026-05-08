@@ -10,3 +10,6 @@ tqdm>=4.66.0
 sqlalchemy>=2.0.0
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
+streamlit-pdf-viewer
+pymupdf
+streamlit-option-menu
