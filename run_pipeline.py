@@ -20,7 +20,7 @@ import config
 from pipeline.pdf_reader import extract_text, get_relevant_chunk
 from pipeline.extractor import extract_paper
 from pipeline.validator import validate_paper, filter_low_confidence_fields, summarise_extraction
-from utils.db import init_db, paper_exists, save_paper, save_cohorts, export_to_csv, load_all_papers
+from utils.db import init_db, paper_exists, save_paper, save_cohorts, save_findings, export_to_csv, load_all_papers
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,9 +52,10 @@ def process_pdf(pdf_path: Path) -> bool:
         paper = filter_low_confidence_fields(paper, min_confidence=config.MIN_CONFIDENCE)
         paper.compute_overall_confidence()
 
-        # 4. Save paper + cohorts
+        # 4. Save paper + cohorts + findings
         save_paper(paper)
         save_cohorts(paper)
+        save_findings(paper)
 
         # 5. Save JSON
         json_path = config.OUTPUT_DIR / f"{paper_id}.json"

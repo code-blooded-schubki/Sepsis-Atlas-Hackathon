@@ -63,18 +63,36 @@ def extract_text(pdf_path: Path) -> str:
     return cleaned
 
 
-def get_relevant_chunk(full_text: str, max_chars: int = 8000) -> str:
-    """Return the most relevant portion of a paper for LLM extraction."""
+def get_relevant_chunk(full_text: str, max_chars: int = 20000) -> str:
+    """
+    Return the most relevant portion of a paper for LLM extraction.
+    Strategy: remove references section, then take as much as possible.
+    """
+    # Remove references section — not useful for extraction
+    ref_match = re.search(
+        r'\n(references|bibliography|literatur)\s*\n', 
+        full_text, re.IGNORECASE
+    )
+    if ref_match:
+        full_text = full_text[:ref_match.start()]
+
+    # If short enough take everything
     if len(full_text) <= max_chars:
         return full_text
+
+    # Find results section
     results_match = re.search(
-        r"(results|findings|outcomes|discussion)", full_text, re.IGNORECASE
+        r'\n(results|findings|outcomes|discussion)\s*\n', 
+        full_text, re.IGNORECASE
     )
+
     if results_match:
-        top = full_text[:3000]
-        bottom_start = results_match.start()
-        bottom = full_text[bottom_start: bottom_start + (max_chars - 3000)]
-        return top + "\n\n--- [middle sections omitted] ---\n\n" + bottom
+        # Take first 4000 chars (abstract/intro) + everything from results
+        top = full_text[:4000]
+        bottom = full_text[results_match.start():]
+        combined = top + "\n\n--- [methods omitted] ---\n\n" + bottom
+        return combined[:max_chars]
+    
     return full_text[:max_chars]
 
 

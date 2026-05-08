@@ -90,6 +90,28 @@ def init_db() -> None:
                 extraction_timestamp TEXT
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS findings (
+                finding_id      TEXT PRIMARY KEY,
+                paper_id        TEXT NOT NULL,
+                predictor       TEXT,
+                outcome         TEXT,
+                timing          TEXT,
+                method          TEXT,
+                effect_size     TEXT,
+                performance     TEXT,
+                notes           TEXT,
+                source_sentence TEXT,
+                confidence      REAL,
+                FOREIGN KEY (paper_id) REFERENCES papers(paper_id)
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_findings_paper ON findings(paper_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_findings_predictor ON findings(predictor)"
+        ))
         conn.commit()
     logger.info(f"Database initialised at {config.DB_PATH}")
 
@@ -188,6 +210,38 @@ def save_cohorts(paper: ExtractedPaper) -> None:
         conn.commit()
     logger.debug(f"Saved {len(paper.cohorts)} cohort(s) for {paper.paper_id}")
 
+def save_findings(paper: ExtractedPaper) -> None:
+    """Save prognostic findings as individual rows for SQL querying."""
+    if not paper.prognostic_findings:
+        return
+    with _engine().connect() as conn:
+        conn.execute(text("DELETE FROM findings WHERE paper_id = :pid"), {"pid": paper.paper_id})
+        for idx, f in enumerate(paper.prognostic_findings):
+            conn.execute(text("""
+                INSERT INTO findings (
+                    finding_id, paper_id, predictor, outcome,
+                    timing, method, effect_size, performance,
+                    notes, source_sentence, confidence
+                ) VALUES (
+                    :finding_id, :paper_id, :predictor, :outcome,
+                    :timing, :method, :effect_size, :performance,
+                    :notes, :source_sentence, :confidence
+                )
+            """), {
+                "finding_id": f"{paper.paper_id}_f{idx:03d}",
+                "paper_id": paper.paper_id,
+                "predictor": f.predictor,
+                "outcome": f.outcome,
+                "timing": f.timing,
+                "method": f.method,
+                "effect_size": f.effect_size,
+                "performance": f.performance,
+                "notes": f.notes,
+                "source_sentence": f.source_sentence,
+                "confidence": f.confidence,
+            })
+        conn.commit()
+    logger.debug(f"Saved {len(paper.prognostic_findings)} finding(s) for {paper.paper_id}")
 
 # ── Load / export ──────────────────────────────────────────────────────────────
 
@@ -203,9 +257,22 @@ def load_cohorts(paper_id: Optional[str] = None) -> pd.DataFrame:
         )
     return pd.read_sql("SELECT * FROM cohorts", _engine())
 
+def load_all_findings(paper_id: Optional[str] = None) -> pd.DataFrame:
+    """Load findings, optionally filtered by paper_id."""
+    if paper_id:
+        return pd.read_sql(
+            "SELECT * FROM findings WHERE paper_id = :pid",
+            _engine(), params={"pid": paper_id}
+        )
+    return pd.read_sql(
+        """SELECT f.*, p.meta_title, p.meta_year
+           FROM findings f
+           JOIN papers p ON f.paper_id = p.paper_id
+           ORDER BY f.paper_id""",
+        _engine()
+    )
 
 def load_cohorts_with_paper_meta() -> pd.DataFrame:
-    """Cohorts joined with paper-level metadata — the main analysis table."""
     return pd.read_sql("""
         SELECT
             c.cohort_id, c.paper_id, c.cohort_name,
@@ -219,6 +286,7 @@ def load_cohorts_with_paper_meta() -> pd.DataFrame:
             c.clinical_setting, c.inclusion_criteria,
             c.mortality_rate, c.mortality_timepoint,
             c.icu_length_of_stay, c.primary_outcome,
+            c.source_sentence,
             c.confidence
         FROM cohorts c
         JOIN papers p ON c.paper_id = p.paper_id
