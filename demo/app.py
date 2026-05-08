@@ -248,6 +248,30 @@ def run_sql(sql: str) -> pd.DataFrame:
     with engine.connect() as conn:
         return pd.read_sql(text(sql), conn)
 
+def summarize_evidence(user_query: str, results: pd.DataFrame) -> str:
+    # Drop bulky columns and cap rows to keep the prompt small
+    compact = results.drop(columns=["source_sentence"], errors="ignore").head(20)
+    table_str = compact.to_csv(index=False)
+
+    prompt = f"""You are summarizing sepsis research evidence for a clinician.
+
+Question asked: {user_query}
+
+Evidence retrieved (CSV, up to 20 rows):
+{table_str}
+
+Write a 2-3 sentence plain-English summary of what this evidence shows in answer to the question.
+- Be concrete: mention specific predictors, effect sizes, or numbers when relevant.
+- If studies disagree or evidence is thin, say so.
+- Do NOT invent details that are not in the table.
+- No preamble, no "Based on the evidence..." — just the summary."""
+
+    resp = _llm.chat.completions.create(
+        model=config.MODEL,
+        max_tokens=250,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.choices[0].message.content.strip()
 
 # ═══════════════════════════════════════════════════════════════
 # Page 1: Evidence Query
@@ -290,7 +314,7 @@ if page == "Evidence Query":
                     st.error(f"LLM error: {e}")
                     st.stop()
 
-            with st.expander("Generated SQL", expanded=True):
+            with st.expander("Generated SQL", expanded=False):
                 st.code(sql, language="sql")
 
             try:
@@ -331,6 +355,15 @@ if page == "Evidence Query":
 
                 display_cols = [c for c in display_df.columns if c not in hide_cols]
                 st.dataframe(display_df[display_cols], use_container_width=True)
+
+                # ── Summary (NEW) ──
+                with st.spinner("Summarizing evidence..."):
+                    try:
+                        summary = summarize_evidence(query, results)
+                        st.markdown("### Summary")
+                        st.info(summary)
+                    except Exception as e:
+                        st.warning(f"Could not generate summary: {e}")
 
                 st.download_button(
                     "⬇ Download results (CSV)",
