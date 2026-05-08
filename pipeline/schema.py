@@ -195,6 +195,10 @@ class ExtractedPaper(BaseModel):
         0.0,
         description="Mean confidence across all extracted fields"
     )
+    overall_verifiability: float = Field(
+        0.0,
+        description="Fraction of extracted values verified against source PDF text"
+    )
     extraction_notes: Optional[str] = Field(
         None,
         description="Any caveats or issues the LLM flagged during extraction"

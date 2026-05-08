@@ -60,6 +60,26 @@ def confidence_badge(conf: float) -> str:
     elif conf >= 0.5: return f"🟡 {conf:.0%}"
     else:             return f"🔴 {conf:.0%}"
 
+def verifiability_badge(score: float) -> str:
+    if score >= 0.8:   return f"✅ {score:.0%}"
+    elif score >= 0.5: return f"⚠️ {score:.0%}"
+    else:              return f"❌ {score:.0%}"
+
+def enrich_with_verifiability(df: pd.DataFrame) -> pd.DataFrame:
+    """Join overall_verifiability + overall_confidence from papers table if paper_id present."""
+    if "paper_id" not in df.columns:
+        return df
+    try:
+        engine = create_engine(f"sqlite:///{config.DB_PATH}", echo=False)
+        meta = pd.read_sql(
+            "SELECT paper_id, overall_confidence, overall_verifiability FROM papers",
+            engine
+        )
+        df = df.merge(meta, on="paper_id", how="left", suffixes=("", "_paper"))
+    except Exception:
+        pass
+    return df
+
 def find_sentence_annotations(pdf_path: str, sentence: str):
     """Search PDF for a sentence and return highlight annotations + the first page it appears on."""
     sentence = re.split(r"\.{3}|…", sentence)[0].strip()
@@ -282,11 +302,35 @@ if page == "Evidence Query":
             if results.empty:
                 st.info("No matching records found.")
             else:
+                results = enrich_with_verifiability(results)
                 st.success(f"{len(results)} row(s) found")
 
-                # Show table without source_sentence column (shown below)
-                display_cols = [c for c in results.columns if c != "source_sentence"]
-                st.dataframe(results[display_cols], use_container_width=True)
+                # Show scores summary
+                if "overall_confidence" in results.columns or "overall_verifiability" in results.columns:
+                    sc1, sc2 = st.columns(2)
+                    if "overall_confidence" in results.columns:
+                        avg_conf = results["overall_confidence"].dropna().mean()
+                        sc1.metric("Avg Confidence", confidence_badge(avg_conf) if pd.notna(avg_conf) else "N/A")
+                    if "overall_verifiability" in results.columns:
+                        avg_ver = results["overall_verifiability"].dropna().mean()
+                        sc2.metric("Avg Verifiability", verifiability_badge(avg_ver) if pd.notna(avg_ver) else "N/A")
+
+                # Format badges in display table
+                display_df = results.copy()
+                hide_cols = {"source_sentence"}
+                if "overall_confidence" in display_df.columns:
+                    display_df["confidence"] = display_df["overall_confidence"].apply(
+                        lambda x: confidence_badge(x) if pd.notna(x) else "N/A"
+                    )
+                    hide_cols.add("overall_confidence")
+                if "overall_verifiability" in display_df.columns:
+                    display_df["verifiability"] = display_df["overall_verifiability"].apply(
+                        lambda x: verifiability_badge(x) if pd.notna(x) else "N/A"
+                    )
+                    hide_cols.add("overall_verifiability")
+
+                display_cols = [c for c in display_df.columns if c not in hide_cols]
+                st.dataframe(display_df[display_cols], use_container_width=True)
 
                 st.download_button(
                     "⬇ Download results (CSV)",

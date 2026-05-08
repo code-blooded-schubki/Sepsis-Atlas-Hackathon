@@ -37,8 +37,9 @@ def init_db() -> None:
                 paper_id              TEXT PRIMARY KEY,
                 pdf_filename          TEXT,
                 extraction_timestamp  TEXT,
-                overall_confidence    REAL,
-                extraction_notes      TEXT,
+                overall_confidence      REAL,
+                overall_verifiability  REAL,
+                extraction_notes       TEXT,
 
                 meta_title            TEXT, meta_title_src TEXT, meta_title_conf REAL,
                 meta_year             TEXT, meta_year_src TEXT, meta_year_conf REAL,
@@ -133,6 +134,7 @@ def save_paper(paper: ExtractedPaper) -> None:
         "pdf_filename": paper.pdf_filename,
         "extraction_timestamp": paper.extraction_timestamp,
         "overall_confidence": paper.overall_confidence,
+        "overall_verifiability": getattr(paper, "overall_verifiability", None),
         "extraction_notes": paper.extraction_notes,
 
         "meta_title": m.title.value, "meta_title_src": m.title.source_sentence, "meta_title_conf": m.title.confidence,

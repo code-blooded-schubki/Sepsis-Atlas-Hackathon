@@ -20,6 +20,7 @@ import config
 from pipeline.pdf_reader import extract_text, get_relevant_chunk
 from pipeline.extractor import extract_paper
 from pipeline.validator import validate_paper, filter_low_confidence_fields, summarise_extraction
+from pipeline.verifier import verify_paper
 from utils.db import init_db, paper_exists, save_paper, save_cohorts, save_findings, export_to_csv, load_all_papers
 from utils.logger import get_logger
 
@@ -52,7 +53,12 @@ def process_pdf(pdf_path: Path) -> bool:
         paper = filter_low_confidence_fields(paper, min_confidence=config.MIN_CONFIDENCE)
         paper.compute_overall_confidence()
 
-        # 4. Save paper + cohorts + findings
+        # 4. Verifiability — checked against raw PDF text, no LLM involved
+        v = verify_paper(paper, full_text)
+        paper.overall_verifiability = v["overall_verifiability"]
+        logger.info(f"{pdf_path.name} — verifiability: {paper.overall_verifiability:.2f}")
+
+        # 5. Save paper + cohorts + findings
         save_paper(paper)
         save_cohorts(paper)
         save_findings(paper)
@@ -64,7 +70,7 @@ def process_pdf(pdf_path: Path) -> bool:
 
         n_cohorts = len(paper.cohorts)
         console.print(summarise_extraction(paper))
-        console.print(f"  [cyan]↳ {n_cohorts} cohort(s) extracted[/cyan]")
+        console.print(f"  [cyan]↳ {n_cohorts} cohort(s) | confidence: {paper.overall_confidence:.2f} | verifiability: {paper.overall_verifiability:.2f}[/cyan]")
         return True
 
     except Exception as e:
@@ -78,8 +84,8 @@ def print_results_table() -> None:
         console.print("[yellow]No papers in database yet.[/yellow]")
         return
     table = Table(title=f"Sepsis Atlas — {len(df)} papers", show_lines=True)
-    cols   = ["pdf_filename", "meta_title", "meta_year", "meta_study_design", "sep_definition", "overall_confidence"]
-    labels = ["File", "Title", "Year", "Design", "Sepsis def.", "Conf."]
+    cols   = ["pdf_filename", "meta_title", "meta_year", "meta_study_design", "sep_definition", "overall_confidence", "overall_verifiability"]
+    labels = ["File", "Title", "Year", "Design", "Sepsis def.", "Conf.", "Verify"]
     for label in labels:
         table.add_column(label, max_width=30, overflow="fold")
     for _, row in df.iterrows():
