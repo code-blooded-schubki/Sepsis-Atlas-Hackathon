@@ -270,7 +270,7 @@ if page == "Evidence Query":
                     st.error(f"LLM error: {e}")
                     st.stop()
 
-            with st.expander("Generated SQL", expanded=True):
+            with st.expander("Generated SQL", expanded=False):
                 st.code(sql, language="sql")
 
             try:
@@ -287,6 +287,15 @@ if page == "Evidence Query":
                 # Show table without source_sentence column (shown below)
                 display_cols = [c for c in results.columns if c != "source_sentence"]
                 st.dataframe(results[display_cols], use_container_width=True)
+
+                # ── Summary (NEW) ──
+                with st.spinner("Summarizing evidence..."):
+                    try:
+                        summary = summarize_evidence(query, results)
+                        st.markdown("### Summary")
+                        st.info(summary)
+                    except Exception as e:
+                        st.warning(f"Could not generate summary: {e}")
 
                 st.download_button(
                     "⬇ Download results (CSV)",
