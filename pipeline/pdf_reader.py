@@ -46,6 +46,31 @@ def _extract_with_pymupdf(pdf_path: Path) -> Optional[str]:
     except Exception as e:
         logger.warning(f"PyMuPDF failed on {pdf_path.name}: {e}")
         return None
+    
+def extract_tables(pdf_path: Path) -> str:
+    """
+    Extract tables from PDF and convert to readable text format.
+    Returns table content as formatted string to prepend to main text.
+    """
+    try:
+        import pdfplumber
+        table_texts = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table:
+                        continue
+                    rows = []
+                    for row in table:
+                        cleaned = [str(cell).strip() if cell else "" for cell in row]
+                        rows.append(" | ".join(cleaned))
+                    table_text = "\n".join(rows)
+                    table_texts.append(f"[TABLE page {i+1}]\n{table_text}\n[END TABLE]")
+        return "\n\n".join(table_texts) if table_texts else ""
+    except Exception as e:
+        logger.warning(f"Table extraction failed: {e}")
+        return ""
 
 
 def extract_text(pdf_path: Path) -> str:
@@ -59,6 +84,12 @@ def extract_text(pdf_path: Path) -> str:
     if not text or len(text.strip()) < 200:
         raise ValueError(f"Could not extract usable text from {pdf_path.name}")
     cleaned = _clean_text(text)
+    # Extract tables and prepend — ensures they're not cut off by chunk limit
+    tables_text = extract_tables(pdf_path)
+    if tables_text:
+        cleaned = "=== EXTRACTED TABLES ===\n" + tables_text + "\n\n=== FULL TEXT ===\n" + cleaned
+        logger.info(f"Added {len(tables_text):,} chars from tables")
+
     logger.info(f"Extracted {len(cleaned):,} chars from {pdf_path.name}")
     return cleaned
 
